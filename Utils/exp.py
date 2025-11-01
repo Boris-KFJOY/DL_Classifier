@@ -13,8 +13,7 @@ def build_run_tag(a, seed=None):
         tags.append("NoSB")
     else:
         sbp = _get(a, "subband_proj", "linear")
-        if sbp != "linear":
-            tags.append(f"SBProj={sbp}")
+        tags.append(f"SBProj={sbp}")
 
     # --- CrossView ---
     if not _get(a, "use_crossview", True):

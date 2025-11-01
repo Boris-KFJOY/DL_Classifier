@@ -41,7 +41,7 @@ CCNN:
   lr_jitter: false             # learning rate scheduler
 
 FBtCNN:
-  epochs: 500                  # number of epochs
+  epochs: 300                  # number of epochs
   bz: 30                     # batch size
   lr: 0.001                       # learning rate
   wd: 0.01                   # weight decay
@@ -63,14 +63,14 @@ SSVEPNet:
   stimulus_type: 12            # 4-class or 12-class
 
 SSVEPformer:
-  epochs: 500                 # number of epochs
+  epochs: 300                 # number of epochs
   bz: 30                     # batch size
   lr: 0.001                       # learning rate
   wd: 0.0001                   # weight decay
   lr_jitter: false             # learning rate scheduler
 
 SSVEPformerX:
-  epochs: 120           # 训练轮数（略高于SSVEPformer以确保收敛）
+  epochs: 300           # 训练轮数（略高于SSVEPformer以确保收敛）
   bz: 30                # batch size（保持一致）
   lr: 0.001             # 学习率，与SSVEPformer一致
   wd: 0.0001            # 权重衰减
@@ -79,7 +79,7 @@ SSVEPformerX:
   depth: 3              # Transformer层数（轻量）
   attention_kernel_length: 7   # 卷积注意核长度，适中
   use_subband:  true      # 开启子带建模模块
-  subband_proj: linear   # linear | identity | dwconv3
+  subband_proj: dwconv3   # linear | identity | dwconv3
   use_crossview: true      # 开启双视图交叉注意模块
   crossview_alpha: 0.5       # 残差缩放，消融用 0.2
   use_harmonic_pe: true    # 开启谐波位置编码模块
