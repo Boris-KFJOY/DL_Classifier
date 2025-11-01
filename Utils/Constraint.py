@@ -22,21 +22,24 @@ def Spectral_Normalization(m):
         return m
 
 def initialize_weights(m):
-    if isinstance(m, nn.Conv2d):
-        m.weight.data.normal_(0, 0.01)
-        m.bias.data.zero_()
-
-    elif isinstance(m, nn.ConvTranspose2d):
-        m.weight.data.normal_(0, 0.01)
-        m.bias.data.zero_()
-
-    elif isinstance(m, nn.LSTM):
-        for name, param in m.named_parameters():
-            if name.startswith("weight"):
-                nn.init.xavier_uniform_(param)
-            else:
-                nn.init.zeros_(param)
-
-    elif isinstance(m, nn.Linear):
-        m.weight.data.normal_(0, 0.01)
-        m.bias.data.zero_()
+    try:
+        if isinstance(m, nn.Conv2d):
+            m.weight.data.normal_(0, 0.01)
+            m.bias.data.zero_()
+        elif isinstance(m, nn.ConvTranspose2d):
+            m.weight.data.normal_(0, 0.01)
+            m.bias.data.zero_()
+        elif isinstance(m, nn.LSTM):
+            for name, param in m.named_parameters():
+                if name.startswith("weight"):
+                    nn.init.xavier_uniform_(param)
+                else:
+                    nn.init.zeros_(param)
+        elif isinstance(m, (nn.Linear, nn.Conv1d)):  # ✅ 新增对 Conv1d 支持
+            if hasattr(m, 'weight') and m.weight is not None:
+                m.weight.data.normal_(0, 0.01)
+            if hasattr(m, 'bias') and m.bias is not None:
+                m.bias.data.zero_()
+    except Exception as e:
+        # 防止 LayerNorm, GELU 等层无 weight/bias 报错
+        pass

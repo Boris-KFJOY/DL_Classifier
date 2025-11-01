@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
+import math
 
 # ----- Utils -----
 class PreNorm(nn.Module):
@@ -56,21 +57,123 @@ class TinyTransformer(nn.Module):
 
 # ----- New ideas -----
 class HarmonicPE(nn.Module):
-    """可学习的频域/谐波位置编码：shape = (1, token_num, token_dim)"""
-    def __init__(self, token_num: int, token_dim: int):
+    """
+    三种位置编码：
+    - harmonic: 正弦/余弦的谐波基（k=1..H），可用于SSVEP的谐波建模
+    - fixed   : 标准Transformer的sin/cos（不可学习）
+    - learned : 可学习表（nn.Parameter）
+    输出形状: (1, T, D)，与 tokens 相加或拼接
+    """
+    def __init__(self,
+                 token_num: int,
+                 token_dim: int,
+                 enable: bool = True,
+                 beta: float = 1.0,
+                 mode: str = "harmonic",
+                 max_harmonics: Optional[int] = None):
         super().__init__()
-        self.pe = nn.Parameter(torch.zeros(1, token_num, token_dim))
-        nn.init.trunc_normal_(self.pe, std=0.02)
-    def forward(self, x):  # x: (B,T,D)
-        return x + self.pe
+        self.enable = enable
+        self.beta = beta
+        self.mode = mode
+        self.token_num = token_num
+        self.token_dim = token_dim
+
+        # learned 模式下使用的可学习表
+        self.pe_table = nn.Parameter(torch.zeros(1, token_num, token_dim))
+        nn.init.trunc_normal_(self.pe_table, std=0.02)
+
+        # harmonic 模式的角频率（k=1..H），H 默认取 D//2（因为有 sin+cos 两路）
+        H = max_harmonics or max(1, token_dim // 2)
+        self.register_buffer("omega", 2 * math.pi * torch.arange(1, H + 1, dtype=torch.float32))  # [H]
+
+        # fixed 模式（标准 transformer）用的 div_term
+        div_term = torch.exp(torch.arange(0, token_dim, 2, dtype=torch.float32) * (-math.log(10000.0) / token_dim))
+        self.register_buffer("div_term", div_term)  # [D//2]
+
+    # ---------- 公共入口 ----------
+    def forward(self, x_or_T=None):
+        """
+        x_or_T: int (序列长度T) 或 Tensor（从中推断 T 和 device）
+        返回: (1, T, D)
+        """
+        T, device, dtype = self._resolve_T_device_dtype(x_or_T)
+
+        if not self.enable:
+            return self._zeros(T, device, dtype)
+
+        if self.mode == "harmonic":
+            pe = self._harmonic_pe(T, device, dtype)        # (1,T,D)
+        elif self.mode == "fixed":
+            pe = self._fixed_bank(T, device, dtype).detach() # (1,T,D)
+        elif self.mode == "learned":
+            pe = self.pe_table[:, :T, :]                    # (1,T,D)
+        else:
+            raise ValueError(f"Unknown PE mode: {self.mode}")
+
+        return self.beta * pe
+
+    # ---------- 实现细节 ----------
+    def _resolve_T_device_dtype(self, x_or_T):
+        if isinstance(x_or_T, int):
+            T = x_or_T
+            device = self.pe_table.device
+            dtype = self.pe_table.dtype
+        elif torch.is_tensor(x_or_T):
+            # 允许传 (B,T,...) 或 (T,...)；统一从倒数第二维取 T
+            T = x_or_T.shape[-2] if x_or_T.dim() >= 2 else x_or_T.shape[-1]
+            device = x_or_T.device
+            dtype = x_or_T.dtype
+        else:
+            T = self.token_num
+            device = self.pe_table.device
+            dtype = self.pe_table.dtype
+        return T, device, dtype
+
+    def _zeros(self, T, device, dtype):
+        return torch.zeros(1, T, self.token_dim, device=device, dtype=dtype)
+
+    def _time_grid(self, T, device, dtype):
+        # 归一化时间/位置网格 [0,1)
+        return torch.linspace(0, 1, steps=T, device=device, dtype=dtype)
+
+    def _harmonic_pe(self, T, device, dtype):
+        """
+        使用谐波基：sin(2π k t), cos(2π k t), k=1..H
+        产物拼成 (T, 2H)；如 2H < D 则右侧零填充，>D 则截断。
+        """
+        t = self._time_grid(T, device, dtype)               # [T]
+        phase = t[:, None] * self.omega[None, :]            # [T,H]
+        sinc = torch.sin(phase)
+        cosc = torch.cos(phase)
+        pe_tc = torch.cat([sinc, cosc], dim=-1)             # [T, 2H]
+
+        # pad/截断到 D
+        if pe_tc.shape[-1] < self.token_dim:
+            pe_tc = F.pad(pe_tc, (0, self.token_dim - pe_tc.shape[-1]))
+        elif pe_tc.shape[-1] > self.token_dim:
+            pe_tc = pe_tc[:, :self.token_dim]
+
+        return pe_tc.unsqueeze(0)                           # (1,T,D)
+
+    def _fixed_bank(self, T, device, dtype):
+        """
+        标准 Transformer 的正弦位置编码（不可学习）
+        """
+        position = torch.arange(T, device=device, dtype=dtype).unsqueeze(1)  # [T,1]
+        pe = torch.zeros(T, self.token_dim, device=device, dtype=dtype)
+        pe[:, 0::2] = torch.sin(position * self.div_term[:pe[:, 0::2].shape[1]])
+        if self.token_dim > 1:
+            pe[:, 1::2] = torch.cos(position * self.div_term[:pe[:, 1::2].shape[1]])
+        return pe.unsqueeze(0)  # (1,T,D)
 
 class SubBandGate(nn.Module):
     """
     子带频域建模：对 (B, T, D) 的 D 维做多尺度卷积，模拟滤波器组 → 加权融合
     等价于在频域上建多个子带视图 (K 个)，然后门控加权到主分支。
     """
-    def __init__(self, token_num: int, token_dim: int, k_list=(5, 9, 17), dropout: float = 0.1):
+    def __init__(self, token_num: int, token_dim: int, k_list=(5, 9, 17), dropout: float = 0.1,proj_type="linear", in_ch=None):
         super().__init__()
+
         self.branches = nn.ModuleList([
             nn.Sequential(
                 nn.Conv1d(token_num, token_num, kernel_size=k, padding=k//2, groups=token_num),  # depthwise
@@ -78,7 +181,12 @@ class SubBandGate(nn.Module):
                 nn.Dropout(dropout)
             ) for k in k_list
         ])
-        self.proj = nn.Linear(token_dim, token_dim, bias=False)
+        if proj_type == "identity":
+            self.proj = nn.Identity()
+        elif proj_type == "dwconv3":
+            self.proj = nn.Conv1d(in_ch, in_ch, 3, padding=1, groups=in_ch, bias=False)
+        else:  # "linear"（原始）
+            self.proj = nn.Linear(token_dim, token_dim, bias=False)
         self.gate = nn.Parameter(torch.zeros(len(k_list)))
         nn.init.zeros_(self.gate)
 
@@ -110,7 +218,7 @@ class CrossViewBlock(nn.Module):
     轻量双视图交叉注意：把输入投影成两种视图 A/B，做一次 multihead attention 交叉融合。
     这里用 PyTorch 自带 MHA；为了简单稳定，embed_dim = token_dim。
     """
-    def __init__(self, token_dim: int, num_heads: int = 4, dropout: float = 0.1):
+    def __init__(self, token_dim: int, num_heads: int = 4, dropout: float = 0.1,enable=True, alpha=1.0):
         super().__init__()
         self.proj_a = nn.Linear(token_dim, token_dim, bias=False)
         self.proj_b = nn.Linear(token_dim, token_dim, bias=False)
@@ -118,6 +226,8 @@ class CrossViewBlock(nn.Module):
         self.mha_ba = nn.MultiheadAttention(embed_dim=token_dim, num_heads=num_heads, dropout=dropout, batch_first=True)
         self.ffn = FFN(token_dim, dropout)
         self.ln = nn.LayerNorm(token_dim)
+        self.enable = enable
+        self.alpha = alpha
 
     def forward(self, x):  # (B, T, D)
         a = self.proj_a(x)
@@ -128,7 +238,10 @@ class CrossViewBlock(nn.Module):
         y = 0.5 * (a2 + b2)
         y = self.ln(x + y)
         y = y + self.ffn(y)
-        return y
+        if not self.enable:
+            return x
+        out = y  # 原有跨通道/视图交互
+        return x + self.alpha * out
 
 # ----- The drop-in model -----
 class SSVEPformerX(nn.Module):
@@ -145,16 +258,27 @@ class SSVEPformerX(nn.Module):
                  class_num: int,
                  token_dim: int,
                  dropout: float = 0.1,
-                 use_subband: bool = True,
-                 use_crossview: bool = True,
-                 use_harmonic_pe: bool = True):
-        super().__init__()
 
+                 use_subband: bool = True,
+                 subband_proj: str = "linear",  # "linear"|"identity"|"dwconv3"（若暂未实现可先保留参数）
+                 use_crossview: bool = True,
+                 crossview_alpha: float = 1.0,
+                 use_harmonic_pe: bool = True,
+                 harmonic_beta: float = 1.0,
+                 pe_mode: str = "harmonic"):
+        super().__init__()
+        self.chs_num = chs_num
         token_num = chs_num * 2
-        # 与旧模型对齐  (见你现有 SSVEPformer.py)
+         # 与旧模型对齐  (见你现有 SSVEPformer.py)
         self.token_num = token_num
         self.token_dim = token_dim
-
+        self.use_subband = use_subband
+        self.subband_proj = subband_proj
+        self.use_crossview = use_crossview
+        self.crossview_alpha = crossview_alpha
+        self.use_harmonic_pe = use_harmonic_pe
+        self.harmonic_beta = harmonic_beta
+        self.pe_mode = pe_mode
         # Patch embedding（与旧模型保持一致的 1x1 conv + LN + GELU）
         self.to_patch_embedding = nn.Sequential(
             nn.Conv1d(chs_num, self.token_num, kernel_size=1, padding=0, groups=1),
@@ -164,11 +288,24 @@ class SSVEPformerX(nn.Module):
         )
 
         # 三个可选增强模块
-        self.harmonic_pe = HarmonicPE(self.token_num, self.token_dim) if use_harmonic_pe else nn.Identity()
-        self.subband = SubBandGate(self.token_num, self.token_dim, k_list=(5, 9, 17),
-                                   dropout=dropout) if use_subband else nn.Identity()
-        self.crossview = CrossViewBlock(self.token_dim, num_heads=4,
-                                        dropout=dropout) if use_crossview else nn.Identity()
+        self.harmonic_pe = HarmonicPE(
+            token_num=self.token_num,
+            token_dim=self.token_dim,
+            enable=use_harmonic_pe,  # ← 关时返回全零
+            beta=self.harmonic_beta,  # 若有
+            mode=self.pe_mode  # 若有
+        )
+        self.subband = (SubBandGate(self.token_num, self.token_dim, k_list=(5, 9, 17),
+                                    proj_type=self.subband_proj,  # 如果你实现了这个入参
+                                    in_ch=self.token_num,
+                                    dropout=dropout)
+                        if self.use_subband else nn.Identity())
+
+        # CrossViewBlock
+        self.crossview = (CrossViewBlock(self.token_dim, num_heads=4,
+                                         alpha=self.crossview_alpha,  # 如果你实现了这个入参
+                                         dropout=dropout)
+                          if self.use_crossview else nn.Identity())
         # 主干：轻量 Transformer（与原风格一致）
 
         self.backbone = TinyTransformer(depth=depth, token_num=self.token_num,
@@ -199,8 +336,8 @@ class SSVEPformerX(nn.Module):
             raise ValueError(f"SSVEPformerX expects (B,{self.chs_num},{self.token_dim}), "
                              f"but got {tuple(x.shape)}")
         x = self.to_patch_embedding(x)          # (B, token_num, token_dim) —— 已经是 "tokens × freq"
-        x = self.harmonic_pe(x)                 # 加谐波位置编码
-
+        pe = self.harmonic_pe(x)  # (1, T, D)，会自动按 B 维广播
+        x = x + pe  # 加谐波位置编码
         x = self.subband(x)                     # 子带门控
         # backbones 统一以 (B,T,D) 形式工作
 

@@ -12,7 +12,7 @@ def _init():
     初始化
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument('--f', type=str, default="../etc/config.yaml", help='--config file')
+    parser.add_argument('--f', type=str, default="./etc/config.yaml", help='--config file')
 
     opt = parser.parse_args()
     config_path = opt.f

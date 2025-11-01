@@ -4,11 +4,11 @@
 import numpy as np
 import torch
 from torch import nn
-from Model import EEGNet, CCNN, SSVEPNet, FBtCNN, ConvCA, SSVEPformer, DDGCNN
+from Model import EEGNet, CCNN, SSVEPNet, FBtCNN, ConvCA, SSVEPformer, DDGCNN,SSVEPformerX
 from Utils import Constraint, LossFunction, Script
 from etc.global_config import config
 
-def data_preprocess(EEGData_Train, EEGData_Test):
+def data_preprocess(EEGData_Train, EEGData_Test,generator=None, worker_init_fn=None):
     '''
     Parameters
     ----------
@@ -51,6 +51,11 @@ def data_preprocess(EEGData_Train, EEGData_Test):
             EEGData_Train = torch.from_numpy(EEGData_Train)
             EEGData_Train = EEGData_Train.squeeze(1)
 
+        elif algorithm == "SSVEPformerX":
+            EEGData_Train = SSVEPformer.complex_spectrum_features(EEGData_Train.numpy(), FFT_PARAMS=[Fs, ws])
+            EEGData_Train = torch.from_numpy(EEGData_Train)
+            EEGData_Train = EEGData_Train.squeeze(1)
+
         elif algorithm == "DDGCNN":
             EEGData_Train = torch.swapaxes(EEGData_Train, axis0=1, axis1=3)  # (Nh, 1, Nc, Nt) => (Nh, Nt, Nc, 1)
 
@@ -85,6 +90,11 @@ def data_preprocess(EEGData_Train, EEGData_Test):
             EEGData_Test = torch.from_numpy(EEGData_Test)
             EEGData_Test = EEGData_Test.squeeze(1)
 
+        elif algorithm == "SSVEPformerX":
+            EEGData_Test = SSVEPformer.complex_spectrum_features(EEGData_Test.numpy(), FFT_PARAMS=[Fs, ws])
+            EEGData_Test = torch.from_numpy(EEGData_Test)
+            EEGData_Test = EEGData_Test.squeeze(1)
+
         elif algorithm == "DDGCNN":
             EEGData_Test = torch.swapaxes(EEGData_Test, axis0=1, axis1=3)  # (Nh, 1, Nc, Nt) => (Nh, Nt, Nc, 1)
 
@@ -94,9 +104,9 @@ def data_preprocess(EEGData_Train, EEGData_Test):
 
     # Create DataLoader for the Dataset
     eeg_train_dataloader = torch.utils.data.DataLoader(dataset=EEGData_Train, batch_size=bz, shuffle=True,
-                                                   drop_last=True)
+                                                   drop_last=True,generator=generator, worker_init_fn=worker_init_fn)
     eeg_test_dataloader = torch.utils.data.DataLoader(dataset=EEGData_Test, batch_size=bz, shuffle=False,
-                                                   drop_last=True)
+                                                   drop_last=True,)
 
     return eeg_train_dataloader, eeg_test_dataloader
 
@@ -133,6 +143,28 @@ def build_model(devices):
         net = SSVEPformer.SSVEPformer(depth=2, attention_kernal_length=31, chs_num=Nc, class_num=Nf,
                                       dropout=0.5)
         net.apply(Constraint.initialize_weights)
+    elif algorithm == "SSVEPformerX":
+
+        a = config[algorithm]  # == config["SSVEPformerX"]
+
+        net = SSVEPformerX.SSVEPformerX(
+            depth=a["depth"],
+            # 兼容命名差异：kernel/kernal 都能读到
+            attention_kernal_length=a.get("attention_kernal_length",
+                                          a.get("attention_kernel_length", 31)),
+            chs_num=Nc,
+            class_num=Nf,
+            token_dim=a.get("token_dim", 560),  # YAML 没写就用默认
+            dropout=a["dropout"],
+            use_subband=a["use_subband"],
+            subband_proj=a.get("subband_proj", "linear"),
+            use_crossview=a["use_crossview"],
+            crossview_alpha=a.get("crossview_alpha", 1.0),
+            use_harmonic_pe=a["use_harmonic_pe"],
+            harmonic_beta=a.get("harmonic_beta", 1.0),
+            pe_mode=a.get("pe_mode", "harmonic"),
+        )
+        net.apply(Constraint.initialize_weights)
 
     elif algorithm == "SSVEPNet":
         net = SSVEPNet.ESNet(Nc, Nt, Nf)
@@ -147,15 +179,17 @@ def build_model(devices):
         net = DDGCNN.DenseDDGCNN([bz, Nt, Nc], k_adj=3, num_out=n_filters, dropout=0.5, n_blocks=3, nclass=Nf,
                                  bias=False, norm=norm, act=act, trans_class=trans_class, device=devices)
 
-    net = net.to(devices)
 
     if algorithm == 'SSVEPNet':
         stimulus_type = str(config[algorithm]["stimulus_type"])
         criterion = LossFunction.CELoss_Marginal_Smooth(Nf, stimulus_type=stimulus_type)
+
     else:
         criterion = nn.CrossEntropyLoss(reduction="none")
 
     if algorithm == "SSVEPformer":
+        optimizer = torch.optim.SGD(net.parameters(), lr=lr, weight_decay=wd, momentum=0.9)
+    elif algorithm == "SSVEPformerX":
         optimizer = torch.optim.SGD(net.parameters(), lr=lr, weight_decay=wd, momentum=0.9)
     else:
         optimizer = torch.optim.Adam(net.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=wd)

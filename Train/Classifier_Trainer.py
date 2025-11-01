@@ -2,11 +2,16 @@
 # Coder:God's hand
 # Time:2022/7/4 20:40
 import torch
+import torch.nn.functional as F
 import time
 from etc.global_config import config
 
 def train_on_batch(num_epochs, train_iter, test_iter, optimizer, criterion, net, device, lr_jitter=False):
     algorithm = config['algorithm']
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    net = net.to(device)
     if algorithm == "DDGCNN":
         lr_decay_rate = config[algorithm]['lr_decay_rate']
         optim_patience = config[algorithm]['optim_patience']
