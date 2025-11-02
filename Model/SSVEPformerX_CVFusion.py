@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
-# SSVEPformerX: subband + cross-view + harmonic PE, drop-in replacement
-# Safe to co-exist with the original SSVEPformer
-# [INFO on 2025-11-02] 本文件保留原单支路 SSVEPformerX 实现。
-# 若需时/频双支路 + CrossView 融合，请使用 Model/SSVEPformerX_CVFusion.py 中的 SSVEPformerX_CVFusion。
+# SSVEPformerX_CVFusion: frequency + time dual-branch fusion via CrossView
+# Extends the original SSVEPformerX while keeping utilities compatible
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -246,34 +244,39 @@ class CrossViewBlock(nn.Module):
         return x + self.alpha * out
 
 # ----- The drop-in model -----
-class SSVEPformerX(nn.Module):
+# 模型概览：复用原 SSVEPformerX 频域主干，可选接入时域支路并在 CrossView 前融合
+class SSVEPformerX_CVFusion(nn.Module):
     """
-    输入/输出张量形状与原 SSVEPformer 完全一致：
-      input:  (B, chs_num, token_dim)  —— 你的预处理已经产出该形状
-      output: (B, class_num)
-    内部会把 (B, chs, D) 通过 1x1 conv 提升到 token_num=chs*2，与旧模型约定对齐。
+    兼容原 SSVEPformerX 的频域输入，并在需要时启用时域预览支路。
+    - 默认行为保持纯频域；
+    - 当提供时域输入时，在 CrossView 前沿通道维拼接后一次性融合。
     """
     def __init__(self,
                  depth: int,
-                 attention_kernal_length: int,  # 仅用于保持参数接口一致
+                 attention_kernal_length: int,
                  chs_num: int,
                  class_num: int,
                  token_dim: int,
                  dropout: float = 0.1,
 
                  use_subband: bool = True,
-                 subband_proj: str = "linear",  # "linear"|"identity"|"dwconv3"（若暂未实现可先保留参数）
+                 subband_proj: str = "linear",
                  use_crossview: bool = True,
                  crossview_alpha: float = 1.0,
                  use_harmonic_pe: bool = True,
                  harmonic_beta: float = 1.0,
-                 pe_mode: str = "harmonic"):
+                 pe_mode: str = "harmonic",
+                 enable_time_branch: bool = True,
+                 time_token_dim: int = 250,
+                 resize_time_to_freq: bool = True):
         super().__init__()
         self.chs_num = chs_num
-        token_num = chs_num * 2
-         # 与旧模型对齐  (见你现有 SSVEPformer.py)
-        self.token_num = token_num
+        self.class_num = class_num
+        self.depth = depth
+        self.attention_kernal_length = attention_kernal_length
+        self.token_num = chs_num * 2
         self.token_dim = token_dim
+        self.dropout = dropout
         self.use_subband = use_subband
         self.subband_proj = subband_proj
         self.use_crossview = use_crossview
@@ -281,7 +284,10 @@ class SSVEPformerX(nn.Module):
         self.use_harmonic_pe = use_harmonic_pe
         self.harmonic_beta = harmonic_beta
         self.pe_mode = pe_mode
-        # Patch embedding（与旧模型保持一致的 1x1 conv + LN + GELU）
+        self.enable_time_branch = enable_time_branch
+        self.time_token_dim = time_token_dim
+
+        # 频域补丁嵌入：1x1 卷积把 C 通道映射到 2C token；示例输入 torch.Size([4, 8, 560]) -> 输出 torch.Size([4, 16, 560])
         self.to_patch_embedding = nn.Sequential(
             nn.Conv1d(chs_num, self.token_num, kernel_size=1, padding=0, groups=1),
             nn.LayerNorm(self.token_dim),
@@ -289,31 +295,74 @@ class SSVEPformerX(nn.Module):
             nn.Dropout(dropout)
         )
 
-        # 三个可选增强模块
+        # 频域谐波位置编码：为每个 token 注入谐波先验；输出与输入保持同形状
         self.harmonic_pe = HarmonicPE(
             token_num=self.token_num,
             token_dim=self.token_dim,
-            enable=use_harmonic_pe,  # ← 关时返回全零
-            beta=self.harmonic_beta,  # 若有
-            mode=self.pe_mode  # 若有
+            enable=use_harmonic_pe,
+            beta=self.harmonic_beta,
+            mode=self.pe_mode
         )
+        # 子带门控：多尺度 depthwise 卷积筛选频段；示例输入 torch.Size([4, 16, 560]) -> 输出 torch.Size([4, 16, 560])
         self.subband = (SubBandGate(self.token_num, self.token_dim, k_list=(5, 9, 17),
-                                    proj_type=self.subband_proj,  # 如果你实现了这个入参
+                                    proj_type=self.subband_proj,
                                     in_ch=self.token_num,
                                     dropout=dropout)
                         if self.use_subband else nn.Identity())
 
-        # CrossViewBlock
+        # CrossViewBlock：视图交叉注意力；示例输入 torch.Size([4, 16, 560]) -> 输出 torch.Size([4, 16, 560])
         self.crossview = (CrossViewBlock(self.token_dim, num_heads=4,
-                                         alpha=self.crossview_alpha,  # 如果你实现了这个入参
+                                         alpha=self.crossview_alpha,
                                          dropout=dropout)
                           if self.use_crossview else nn.Identity())
-        # 主干：轻量 Transformer（与原风格一致）
 
-        self.backbone = TinyTransformer(depth=depth, token_num=self.token_num,
-                                        token_dim=self.token_dim, ksize=attention_kernal_length, dropout=dropout)
+        # 频域主干：轻量 TinyTransformer；示例输入 torch.Size([4, 16, 560]) -> 输出 torch.Size([4, 16, 560])
+        self.backbone = TinyTransformer(depth=depth,
+                                        token_num=self.token_num,
+                                        token_dim=self.token_dim,
+                                        ksize=attention_kernal_length,
+                                        dropout=dropout)
 
-        # 分类头：简洁稳健（保留与旧模型相同的输出维度）
+        # 时域支路：结构与频域对称，方便双支路对齐
+        if self.enable_time_branch:
+            # 时域补丁嵌入：示例输入 torch.Size([4, 8, 250]) -> 输出 torch.Size([4, 16, 250])
+            self.to_patch_embedding_time = nn.Sequential(
+                nn.Conv1d(self.chs_num, self.token_num, kernel_size=1, padding=0, bias=False),
+                nn.LayerNorm(time_token_dim),
+                nn.GELU(),
+                nn.Dropout(self.dropout)
+            )
+
+            # 时域 TinyTransformer：示例输入 torch.Size([4, 16, 250]) -> 输出 torch.Size([4, 16, 250])
+            self.backbone_time = TinyTransformer(
+                depth=self.depth,
+                token_num=self.token_num,
+                token_dim=time_token_dim,
+                ksize=self.attention_kernal_length,
+                dropout=self.dropout
+            )
+
+            # 时域谐波位置编码：与频域保持一致的设计
+            self.harmonic_pe_time = HarmonicPE(
+                token_num=self.token_num,
+                token_dim=time_token_dim,
+                enable=self.use_harmonic_pe,
+                beta=self.harmonic_beta,
+                mode=self.pe_mode
+            )
+        else:
+            self.to_patch_embedding_time = None
+            self.backbone_time = None
+            self.harmonic_pe_time = None
+
+        # 时域长度对齐：可选线性插值把时域长度调到 freq token_dim；示例输出 torch.Size([4, 16, 560])
+        self.resize_time_to_freq = resize_time_to_freq and self.enable_time_branch
+        if self.resize_time_to_freq and time_token_dim != self.token_dim:
+            self.time_resizer = lambda x: F.interpolate(x, size=self.token_dim, mode="linear", align_corners=False)
+        else:
+            self.time_resizer = None
+
+        # 频域分类头：保持与原模型一致；示例输出 torch.Size([B, class_num])
         hidden = class_num * 6
         self.head = nn.Sequential(
             nn.Flatten(),
@@ -325,28 +374,103 @@ class SSVEPformerX(nn.Module):
             nn.Linear(hidden, class_num)
         )
 
-        # 权重初始化（与旧模型一致）
+        # 双支路分类头：处理拼接后的 4C token；示例输入 torch.Size([B, 32, token_dim]) -> 输出 torch.Size([B, class_num])
+        fused_token_num = self.token_num * 2
+        self.head_dual = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.token_dim * fused_token_num, hidden),
+            nn.LayerNorm(hidden),
+            nn.GELU(),
+            nn.Dropout(0.5),
+            nn.Linear(hidden, class_num)
+        )
+
+        # 参数初始化：沿用原模型，卷积/线性层采用 N(0, 0.01)
         for m in self.modules():
             if isinstance(m, (nn.Conv1d, nn.Linear)):
                 nn.init.normal_(m.weight, mean=0.0, std=0.01)
                 if getattr(m, "bias", None) is not None:
                     nn.init.zeros_(m.bias)
 
-    def forward(self, x):  # x: (B, chs_num, token_dim)
-        # 与旧模型相同的 entry
-        if x.size(1) != self.chs_num or x.size(-1) != self.token_dim:
-            raise ValueError(f"SSVEPformerX expects (B,{self.chs_num},{self.token_dim}), "
-                             f"but got {tuple(x.shape)}")
-        x = self.to_patch_embedding(x)          # (B, token_num, token_dim) —— 已经是 "tokens × freq"
-        pe = self.harmonic_pe(x)  # (1, T, D)，会自动按 B 维广播
-        x = x + pe  # 加谐波位置编码
-        x = self.subband(x)                     # 子带门控
-        # backbones 统一以 (B,T,D) 形式工作
+    def forward(self, x_freq, x_time=None):
+        """
+        x_freq: [B, C, F]  频域输入（预处理生成的复谱特征）
+        x_time: [B, C, T]  时域输入（可选；None 时退回单支路）
+        """
+        # --- freq branch ---
+        if x_freq.size(1) != self.chs_num or x_freq.size(-1) != self.token_dim:
+            raise ValueError(
+                f"SSVEPformerX_CVFusion expects freq input (B,{self.chs_num},{self.token_dim}), "
+                f"but got {tuple(x_freq.shape)}"
+            )
 
-        x = self.backbone(x)
-        # 轻量 conv-transformer
+        xf = self.to_patch_embedding(x_freq)  # (B, 2C, F)
+        pef = self.harmonic_pe(xf)  # (1, F, 2C) 等效相加
+        xf = xf + pef
+        xf = self.subband(xf)  # (B, 2C, F)
+        xf = self.backbone(xf)  # (B, 2C, F)
 
-        x = self.crossview(x)                   # 双视图交叉注意（轻量）
-        out = self.head(x)
+        use_time_branch = self.enable_time_branch and (x_time is not None)
 
+        # --- single-branch (freq only) ---
+        if not use_time_branch:
+            # 维持你现在的行为：单路直接走 head（不经 crossview）
+            out = self.head(xf)  # (B, num_classes)
+            return out
+
+        # --- time branch ---
+        if x_time.size(1) != self.chs_num:
+            raise ValueError(
+                f"Time branch expects channel dim {self.chs_num}, but got {tuple(x_time.shape)}"
+            )
+
+        xt = self.to_patch_embedding_time(x_time)  # (B, 2C, T)
+        pet = self.harmonic_pe_time(xt)
+        xt = xt + pet
+        xt = self.backbone_time(xt)  # (B, 2C, T)
+
+        # 对齐时/频长度
+        if self.time_resizer is not None:
+            xt = self.time_resizer(xt)  # -> (B, 2C, F)
+        elif xt.size(-1) != xf.size(-1):
+            raise ValueError(
+                f"Time/Freq token dim mismatch: {xt.size(-1)} vs {xf.size(-1)}. "
+                f"Enable resize_time_to_freq or align preprocessing."
+            )
+
+        # --- fuse before CrossView ---
+        x_cat = torch.cat([xt, xf], dim=1)  # (B, 4C, F) 通道维拼接
+        x_cv = self.crossview(x_cat)  # (B, 4C, F) 直接让 CrossView 融合两支路
+
+        # --- dual-branch head ---
+        out = self.head_dual(x_cv)  # (B, num_classes)
         return out
+
+
+__all__ = ["SSVEPformerX_CVFusion"]
+
+
+if __name__ == "__main__":
+    # Quick validation mirroring MTSNet to ensure shape compatibility.
+    batch_size, chs, time_len, freq_len, num_classes = 4, 8, 250, 560, 40
+    freq_input = torch.randn(batch_size, chs, freq_len)
+    time_input = torch.randn(batch_size, chs, time_len)
+
+    model = SSVEPformerX_CVFusion(
+        depth=2,
+        attention_kernal_length=31,
+        chs_num=chs,
+        class_num=num_classes,
+        token_dim=freq_len,
+        dropout=0.5,
+        enable_time_branch=True,
+        time_token_dim=time_len,
+        resize_time_to_freq=True,
+    )
+
+    logits_dual = model(freq_input, time_input)
+    print("Dual-branch output:", logits_dual.shape)
+
+    logits_single = model(freq_input)
+    print("Single-branch output:", logits_single.shape)

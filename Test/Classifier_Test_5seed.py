@@ -37,6 +37,7 @@ def run():
     '''Parameters for ssvep data'''
     ws = config["data_param"]["ws"]
     Ns = config["data_param"]['Ns']
+    dual= config["data_param"]["dual"]
     a = config[algorithm]
     '''Parameters for DL-based methods'''
     epochs = config[algorithm]['epochs']
@@ -65,7 +66,7 @@ def run():
                 EEGData_Test = EEGDataset.getBETADataset(subject=testSubject, mode='test')
 
                 eeg_train_dataloader, eeg_test_dataloader = Trainer_Script.data_preprocess(
-                    EEGData_Train, EEGData_Test, generator=g, worker_init_fn=seed_worker
+                    EEGData_Train, EEGData_Test, generator=g, worker_init_fn=seed_worker,whether_dual=dual
                 )
 
                 net, criterion, optimizer = Trainer_Script.build_model(devices)

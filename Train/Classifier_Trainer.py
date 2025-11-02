@@ -26,6 +26,7 @@ def train_on_batch(num_epochs, train_iter, test_iter, optimizer, criterion, net,
         net.train()
         sum_loss = 0.0
         sum_acc = 0.0
+        ''''''
         for data in train_iter:
             if algorithm == "ConvCA":
                 X, temp, y = data
@@ -34,11 +35,20 @@ def train_on_batch(num_epochs, train_iter, test_iter, optimizer, criterion, net,
                 y = torch.as_tensor(y.reshape(y.shape[0]), dtype=torch.int64).to(device)
                 y_hat = net(X, temp)
 
+
             else:
-                X, y = data
-                X = X.type(torch.FloatTensor).to(device)
-                y = torch.as_tensor(y.reshape(y.shape[0]), dtype=torch.int64).to(device)
-                y_hat = net(X)
+                # 兼容单支路 (x_freq, y) 与双支路 (x_time, x_freq, y)
+                if isinstance(data, (list, tuple)) and len(data) == 3:
+                    x_time, x_freq, y = data
+                    x_time = x_time.type(torch.FloatTensor).to(device, non_blocking=True)
+                    x_freq = x_freq.type(torch.FloatTensor).to(device, non_blocking=True)
+                    y = torch.as_tensor(y.reshape(y.shape[0]), dtype=torch.int64).to(device, non_blocking=True)
+                    y_hat = net(x_freq, x_time)  # 双支路前向
+                else:
+                    X, y = data  # 兼容老的二元组
+                    X = X.type(torch.FloatTensor).to(device, non_blocking=True)
+                    y = torch.as_tensor(y.reshape(y.shape[0]), dtype=torch.int64).to(device, non_blocking=True)
+                    y_hat = net(X)  # 单支路前向
 
             loss = criterion(y_hat, y).sum()
             optimizer.zero_grad()
@@ -66,11 +76,20 @@ def train_on_batch(num_epochs, train_iter, test_iter, optimizer, criterion, net,
                     y = torch.as_tensor(y.reshape(y.shape[0]), dtype=torch.int64).to(device)
                     y_hat = net(X, temp)
 
+
                 else:
-                    X, y = data
-                    X = X.type(torch.FloatTensor).to(device)
-                    y = torch.as_tensor(y.reshape(y.shape[0]), dtype=torch.int64).to(device)
-                    y_hat = net(X)
+
+                    if isinstance(data, (list, tuple)) and len(data) == 3:
+                        x_time, x_freq, y = data
+                        x_time = x_time.type(torch.FloatTensor).to(device, non_blocking=True)
+                        x_freq = x_freq.type(torch.FloatTensor).to(device, non_blocking=True)
+                        y = torch.as_tensor(y.reshape(y.shape[0]), dtype=torch.int64).to(device, non_blocking=True)
+                        y_hat = net(x_freq, x_time)
+                    else:
+                        X, y = data
+                        X = X.type(torch.FloatTensor).to(device, non_blocking=True)
+                        y = torch.as_tensor(y.reshape(y.shape[0]), dtype=torch.int64).to(device, non_blocking=True)
+                        y_hat = net(X)
 
                 sum_acc += (y == y_hat.argmax(dim=-1)).float().mean()
             val_acc = sum_acc / len(test_iter)

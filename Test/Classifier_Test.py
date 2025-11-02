@@ -40,7 +40,7 @@ def run():
     '''Parameters for ssvep data'''
     ws = config["data_param"]["ws"]
     Ns = config["data_param"]['Ns']
-
+    dual = config["data_param"]["dual"]
     '''Parameters for DL-based methods'''
     epochs = config[algorithm]['epochs']
     lr_jitter = config[algorithm]['lr_jitter']
@@ -77,7 +77,7 @@ def run():
             EEGData_Train = EEGDataset.getBETADataset(subject=testSubject, mode='train')
             EEGData_Test = EEGDataset.getBETADataset(subject=testSubject, mode='test')
 
-            eeg_train_dataloader, eeg_test_dataloader = Trainer_Script.data_preprocess(EEGData_Train, EEGData_Test,generator=g, worker_init_fn=seed_worker)
+            eeg_train_dataloader, eeg_test_dataloader = Trainer_Script.data_preprocess(EEGData_Train, EEGData_Test,generator=g, worker_init_fn=seed_worker,whether_dual=dual)
 
             # Define Network
             net, criterion, optimizer = Trainer_Script.build_model(devices)

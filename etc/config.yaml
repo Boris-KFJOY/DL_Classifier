@@ -1,4 +1,4 @@
-algorithm: SSVEPformerX
+algorithm: SSVEPformerX_CVFusion
 
 # Parameters for training procedure
 train_param:
@@ -14,6 +14,7 @@ data_param:
   Fs: 250                      # frequency of sample
   Nf: 8                       # number of stimulus
   Ns: 15                      # number of subjects
+  dual: true                  #  use time domain data
                       # number of subjects
 # Parameters for ssvep BETA data
 data_param_BETA:
@@ -87,6 +88,28 @@ SSVEPformerX:
   pe_mode: fixed          # harmonic | fixed  (可选)
   optimizer: SGD
 
+SSVEPformerX_CVFusion:
+  epochs: 300           # 训练轮数（略高于SSVEPformer以确保收敛）
+  bz: 30                # batch size（保持一致）
+  lr: 0.001             # 学习率，与SSVEPformer一致
+  wd: 0.0001            # 权重衰减
+  lr_jitter: false      # 不启用学习率抖动（可后期打开）
+  dropout: 0.3          # 中等dropout，更适合子带与交叉注意
+  depth: 3
+  attention_kernal_length: 31
+  token_dim: 560        # 频域长度（与频谱处理一致）
+
+  use_subband: true
+  subband_proj: "linear"
+  use_crossview: true
+  crossview_alpha: 1.0
+  use_harmonic_pe: true
+  harmonic_beta: 1.0
+  pe_mode: "harmonic"
+
+  enable_time_branch: true
+  time_token_dim: 250   # 时域长度（Nt = Fs*ws）
+  resize_time_to_freq: true
 
 DDGCNN:
   epochs: 500                  # number of epochs
