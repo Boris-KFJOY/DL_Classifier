@@ -109,7 +109,7 @@ SSVEPformerX_CVFusion:
   pe_mode: "harmonic"
 
   enable_time_branch: true
-  time_token_dim: 250   # 时域长度（Nt = Fs*ws）
+    # 时域长度（Nt = Fs*ws）
   resize_time_to_freq: true
 
   use_len_fusion_block: true

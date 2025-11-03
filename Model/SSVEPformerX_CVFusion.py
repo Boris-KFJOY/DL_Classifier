@@ -362,7 +362,6 @@ class SSVEPformerX_CVFusion(nn.Module):
                                         ksize=attention_kernal_length,
                                         dropout=dropout)
 
-
         # 时域支路：结构与频域对称，方便双支路对齐
         if self.enable_time_branch:
             # 时域补丁嵌入：示例输入 torch.Size([4, 8, 250]) -> 输出 torch.Size([4, 16, 250])
@@ -425,6 +424,7 @@ class SSVEPformerX_CVFusion(nn.Module):
             nn.Dropout(0.5),
             nn.Linear(hidden, class_num)
         )
+        self.head_dual_2C = DualHead(token_dim=self.token_dim, hidden=hidden, class_num=class_num)
 
         if self.fusion_mode == "len_cat":
             fused_len = self.time_token_dim + self.token_dim  # T + F
@@ -510,8 +510,10 @@ class SSVEPformerX_CVFusion(nn.Module):
             x_t = xt                      # (B, 2C, F)
             x_f = xf                      # (B, 2C, F)
             x_t, x_f = self.crossview(x_t, x_f)   # 双流交互
-            x_dual = torch.cat([x_t, x_f], dim=1)
-            return self.head_dual(x_dual)       # 修改 head_dual 接口（见下）
+            '''x_dual = torch.cat([x_t, x_f], dim=1)
+            
+            return self.head_dual(x_dual)       # 修改 head_dual 接口（见下）'''
+            return self.head_dual_2C(x_t, x_f)
         else:
             raise ValueError("Unknown fusion_mode=... choose 'len_cat' or 'chan_cat'.")
 
