@@ -101,7 +101,7 @@ SSVEPformerX_CVFusion:
   token_dim: 560        # 频域长度（与频谱处理一致）
 
   use_subband: true
-  subband_proj: "linear"
+  subband_proj: "dwconv3"
   use_crossview: true
   crossview_alpha: 1.0
   use_harmonic_pe: true

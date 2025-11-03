@@ -510,10 +510,11 @@ class SSVEPformerX_CVFusion(nn.Module):
             x_t = xt                      # (B, 2C, F)
             x_f = xf                      # (B, 2C, F)
             x_t, x_f = self.crossview(x_t, x_f)   # 双流交互
-            '''x_dual = torch.cat([x_t, x_f], dim=1)
+            x_dual = torch.cat([x_t, x_f], dim=1)
             
             return self.head_dual(x_dual)       # 修改 head_dual 接口（见下）'''
-            return self.head_dual_2C(x_t, x_f)
+            '''return self.head_dual_2C(x_t, x_f)'''
+
         else:
             raise ValueError("Unknown fusion_mode=... choose 'len_cat' or 'chan_cat'.")
 
