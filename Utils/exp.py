@@ -31,6 +31,25 @@ def build_run_tag(a, seed=None):
     if _get(a, "pe_mode", "harmonic") != "harmonic":
         tags.append(f"PE={_get(a,'pe_mode')}")
 
+    if _get(a, "enable_time_branch", False):
+        tags.append("Dual")  # 开启双支路
+        fm = _get(a, "fusion_mode", "chan_cat")
+        if fm == "len_cat":
+            tags.append("FM=len")  # 长度维拼接（A 方案）
+            if _get(a, "use_len_fusion_block", True):
+                tags.append("LenFB")  # 使用了长度维融合块
+            # 可选：把 T/F 标到 tag，便于不同窗长/频长的对照
+            T = _get(a, "time_token_dim", None)
+            F = _get(a, "token_dim", None)
+            if T and F:
+                tags.append(f"T{T}-F{F}")
+        else:
+            # 旧方案：通道维拼接
+            tags.append("FM=chan")
+            if _get(a, "resize_time_to_freq", True):
+                tags.append("ResizeTF")  # 时域插值到 F
+    else:
+        tags.append("FreqOnly")  # 单支路基线
     # --- Seed (可选) ---
     if seed is not None:
         tags.append(f"seed={seed}")

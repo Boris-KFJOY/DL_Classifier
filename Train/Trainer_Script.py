@@ -223,7 +223,8 @@ def build_model(devices):
         a = config[algorithm]  # == config["SSVEPformerX_CVFusion"]
 
         net = SSVEPformerX_CVFusion.SSVEPformerX_CVFusion(
-            depth=a.get("depth", 2),
+            depth_time=a.get("depth_time", 2),
+            depth_freq=a.get("depth_freq", 2),
             attention_kernal_length=a.get("attention_kernal_length",
                                           a.get("attention_kernel_length", 31)),  # 兼容拼写
             chs_num=Nc,
@@ -244,6 +245,9 @@ def build_model(devices):
             enable_time_branch=a.get("enable_time_branch", True),
             time_token_dim=a.get("time_token_dim", int(Fs * ws)),  # 通常等于 Nt
             resize_time_to_freq=a.get("resize_time_to_freq", True),
+
+            fusion_mode=a.get("fusion_mode", "chan_cat"),
+            use_len_fusion_block=a.get("use_len_fusion_block", True)
         )
         net.apply(Constraint.initialize_weights)  # 与旧模型保持一致的初始化策略
     elif algorithm == "SSVEPNet":

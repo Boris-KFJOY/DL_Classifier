@@ -77,7 +77,8 @@ SSVEPformerX:
   wd: 0.0001            # 权重衰减
   lr_jitter: false      # 不启用学习率抖动（可后期打开）
   dropout: 0.3          # 中等dropout，更适合子带与交叉注意
-  depth: 3              # Transformer层数（轻量）
+  depth_freq: 1         # Transformer层数（轻量）
+  depth_time: 2
   attention_kernel_length: 7   # 卷积注意核长度，适中
   use_subband:  true      # 开启子带建模模块
   subband_proj: dwconv3   # linear | identity | dwconv3
@@ -110,6 +111,9 @@ SSVEPformerX_CVFusion:
   enable_time_branch: true
   time_token_dim: 250   # 时域长度（Nt = Fs*ws）
   resize_time_to_freq: true
+
+  use_len_fusion_block: true
+  fusion_mode: "chan_cat"
 
 DDGCNN:
   epochs: 500                  # number of epochs
